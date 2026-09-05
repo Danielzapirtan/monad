@@ -308,8 +308,16 @@ def run_pyannote(path, hf_token, num_speakers=None):
     pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-community-1", token=hf_token)
     diarization = pipeline(path, num_speakers=num_speakers) if num_speakers else pipeline(path)
 
+    # Community-1 provides an exclusive timeline specifically designed to
+    # align speaker turns with transcription segments. Keep the regular
+    # timeline as a compatibility fallback for older pipeline outputs.
+    annotation = getattr(
+        diarization,
+        "exclusive_speaker_diarization",
+        getattr(diarization, "speaker_diarization", diarization),
+    )
     turns = []
-    for turn, speaker in diarization.speaker_diarization:
+    for turn, speaker in annotation:
         turns.append({"start": turn.start, "end": turn.end, "speaker": speaker})
     return turns
 
