@@ -186,101 +186,36 @@ def run_faster_whisper(path, language, device, model_size):
     return [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in segments]
 
 
-def run_mlx_whisper_cli(path, language, model_size, hf_token=None, diarize=False):
-    """Use whispermlx CLI tool instead of Python library.
-    
-    This matches the usage pattern from test.sh and provides native diarization support.
-    """
-    # Check if whispermlx is available
-    if not shutil.which("whispermlx"):
-        raise RuntimeError(
-            "whispermlx command not found. Please install it: pip install whispermlx"
-        )
-    
-    # Build command
-    cmd = [
-        "whispermlx",
-        path,
-        "--model", model_size,
-        "--language", language,
-        "--output_format", "json",
-        "--output_dir", os.path.dirname(path),  # Output to chunk directory
-        "--condition_on_previous_text", "False",
-        "--compression_ratio_threshold", "2.4",
-        "--logprob_threshold", "-1.0",
-        "--no_speech_threshold", "0.6",
-    ]
-    
-    # Add diarization if requested
-    if diarize:
-        if not hf_token:
-            raise RuntimeError(
-                "Hugging Face token required for diarization with whispermlx. "
-                "Please provide it in the API key field."
-            )
-        cmd.extend(["--diarize", "--hf_token", hf_token])
-    
+def run_mlx_whisper(path, language, model_size):
+    """Transcribe the full file directly so VAD windows cannot duplicate text."""
     try:
-        # Run whispermlx
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=1800,  # 30 minutes max
-            check=True
-        )
-        
-        # Find the JSON output file
-        # whispermlx creates a JSON file with the same basename as the audio file
-        base_name = os.path.splitext(os.path.basename(path))[0]
-        json_path = os.path.join(os.path.dirname(path), f"{base_name}.json")
-        
-        if not os.path.exists(json_path):
-            # Try alternative naming patterns
-            for f in os.listdir(os.path.dirname(path)):
-                if f.endswith(".json") and base_name in f:
-                    json_path = os.path.join(os.path.dirname(path), f)
-                    break
-        
-        if not os.path.exists(json_path):
-            raise RuntimeError(
-                f"whispermlx completed but output JSON file not found for {path}"
-            )
-        
-        # Parse the JSON output
-        with open(json_path, 'r') as f:
-            data = json.load(f)
-        
-        # Extract segments
-        segments = []
-        if "segments" in data:
-            for seg in data["segments"]:
-                segment = {
-                    "start": seg["start"],
-                    "end": seg["end"],
-                    "text": seg["text"].strip()
-                }
-                # Include speaker info if available (from diarization)
-                if "speaker" in seg:
-                    segment["speaker"] = seg["speaker"]
-                segments.append(segment)
-        elif "text" in data:
-            # Fallback: create single segment from full text
-            segments.append({
-                "start": 0.0,
-                "end": 0.0,  # Unknown duration
-                "text": data["text"].strip()
-            })
-        
-        return segments
-        
-    except subprocess.CalledProcessError as e:
-        error_msg = e.stderr if e.stderr else e.stdout
+        import mlx_whisper
+    except ImportError:
         raise RuntimeError(
-            f"whispermlx failed with error:\n{error_msg[:500]}"
+            "mlx-whisper is not installed on the server (pip install whispermlx)."
         )
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Failed to parse whispermlx output: {e}")
+
+    model_name = (
+        model_size if "/" in model_size
+        else f"mlx-community/whisper-{model_size}-mlx"
+    )
+    result = mlx_whisper.transcribe(
+        path,
+        path_or_hf_repo=model_name,
+        language=language,
+        condition_on_previous_text=False,
+        temperature=0,
+        compression_ratio_threshold=2.4,
+        logprob_threshold=-1.0,
+        no_speech_threshold=0.6,
+        word_timestamps=False,
+        verbose=False,
+    )
+    return [
+        {"start": s["start"], "end": s["end"], "text": s["text"].strip()}
+        for s in result.get("segments", [])
+        if s.get("text", "").strip()
+    ]
 
 
 def transcribe_file(path, engine, language, device, model_size, hf_token=None, diarize=False):
@@ -289,8 +224,7 @@ def transcribe_file(path, engine, language, device, model_size, hf_token=None, d
     if engine == "faster":
         return run_faster_whisper(path, language, device, model_size)
     if engine == "mlx":
-        # Now using the CLI version that supports native diarization
-        return run_mlx_whisper_cli(path, language, model_size, hf_token, diarize)
+        return run_mlx_whisper(path, language, model_size)
     raise RuntimeError(f"Unknown transcription engine '{engine}'.")
 
 
