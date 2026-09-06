@@ -182,7 +182,16 @@ def run_faster_whisper(path, language, device, model_size):
         raise RuntimeError("faster-whisper is not installed on the server (pip install faster-whisper).")
     compute_type = "float16" if device == "cuda" else "int8"
     model = WhisperModel(model_size, device=device, compute_type=compute_type)
-    segments, _info = model.transcribe(path, language=language)
+    segments, _info = model.transcribe(
+        path,
+        language=language,
+        condition_on_previous_text=False,
+        compression_ratio_threshold=2.4,
+        log_prob_threshold=-1.0,
+        no_speech_threshold=0.6,
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 500},
+    )
     return [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in segments]
 
 
