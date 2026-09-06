@@ -331,6 +331,23 @@ def assign_speakers_from_turns(segments, turns):
         seg["speaker"] = best["speaker"]
 
 
+def deduplicate_overlapping_segments(segments):
+    """Drop duplicate transcript rows caused by overlapping selected chunks."""
+    kept = []
+    for segment in sorted(segments, key=lambda s: (s["start"], s["end"])):
+        text = re.sub(r"\s+", " ", segment["text"]).strip().casefold()
+        duplicate = False
+        for previous in kept:
+            previous_text = re.sub(r"\s+", " ", previous["text"]).strip().casefold()
+            overlap = min(segment["end"], previous["end"]) - max(segment["start"], previous["start"])
+            if text and text == previous_text and overlap > 0:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(segment)
+    return kept
+
+
 def run_ai_diarization(segments, provider, api_key, num_speakers=None):
     """Heuristic, text-based speaker labeling via an LLM (no separate audio model)."""
     if not api_key:
@@ -683,6 +700,10 @@ def api_transcribe():
         return jsonify(error=str(e)), 500
     except Exception as e:
         return jsonify(error=f"Transcription failed: {e}"), 500
+
+    # Chunks may overlap; do not send duplicate timestamped rows to the
+    # diarizer or show them twice in the final transcript.
+    all_segments = deduplicate_overlapping_segments(all_segments)
 
     # Apply the selected diarizer to the timestamped transcription.
     if diarize:
