@@ -3,7 +3,7 @@
 Document Utilities
 ===================
 A single-file Flask app for converting and splitting documents (PDF, DOCX,
-EPUB, Markdown, HTML, TXT), with optional AI-assisted chapter splitting and
+EPUB, MOBI, AZW3, Markdown, HTML, TXT), with optional AI-assisted chapter splitting and
 table-of-contents generation (via a user-supplied Claude or Gemini API key).
 
 Run:
@@ -78,6 +78,11 @@ try:
 except ImportError:
     SimpleDocTemplate = None
 
+try:
+    from mobi import Mobi
+except ImportError:
+    Mobi = None
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -89,7 +94,7 @@ os.makedirs(STORAGE_DIR, exist_ok=True)
 MAX_CONTENT_LENGTH = 60 * 1024 * 1024  # 60 MB upload cap
 SESSION_TTL_SECONDS = 2 * 60 * 60      # temp files older than this get swept
 
-ALLOWED_EXTENSIONS = {"pdf", "docx", "epub", "txt", "md", "markdown", "html", "htm"}
+ALLOWED_EXTENSIONS = {"pdf", "docx", "epub", "txt", "md", "markdown", "html", "htm", "azw3", "mobi"}
 TARGET_FORMATS = {"pdf", "docx", "epub", "md", "html", "txt"}
 
 DEFAULT_MODELS = {
@@ -260,6 +265,8 @@ def extract_blocks(path, ext):
         return extract_docx(path)
     if ext == "epub":
         return extract_epub(path)
+    if ext in ("azw3", "mobi"):
+        return extract_azw3(path)
     if ext == "txt":
         return extract_txt(path)
     if ext in ("md", "markdown"):
@@ -388,6 +395,73 @@ def extract_epub(path):
             else:
                 blocks.append({"type": "para", "text": text, "chapter": chapter_idx})
     return blocks
+
+
+def extract_azw3(path):
+    if Mobi is None:
+        raise RuntimeError(
+            "The 'mobi' library is required to read AZW3/MOBI files. "
+            "Install with: pip install mobi"
+        )
+    
+    tempdir = None
+    try:
+        tempdir = tempfile.mkdtemp()
+        book = Mobi(path)
+        book.parse()
+        
+        # For AZW3, try to extract as EPUB first (AZW3 is EPUB-like)
+        epub_path = os.path.join(tempdir, 'extracted.epub')
+        try:
+            book.extract_epub(epub_path)
+            if os.path.exists(epub_path):
+                return extract_epub(epub_path)
+        except Exception:
+            pass
+        
+        # Fallback: try to get HTML content
+        html_content = None
+        if hasattr(book, 'get_html') and callable(book.get_html):
+            try:
+                html_content = book.get_html()
+            except Exception:
+                pass
+        
+        if html_content is None and hasattr(book, 'content'):
+            html_content = book.content
+            
+        if html_content:
+            # Parse HTML content
+            if isinstance(html_content, bytes):
+                html_content = html_content.decode('utf-8', errors='ignore')
+            
+            if BeautifulSoup is None:
+                raise RuntimeError("beautifulsoup4 is required to read AZW3 HTML content.")
+            
+            soup = BeautifulSoup(html_content, 'html.parser')
+            blocks = []
+            for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p']):
+                text = re.sub(r'\s+', ' ', tag.get_text(strip=True))
+                if not text:
+                    continue
+                if tag.name.startswith('h'):
+                    blocks.append({"type": "heading", "level": int(tag.name[1]), "text": text})
+                else:
+                    blocks.append({"type": "para", "text": text})
+            return blocks
+        
+        raise RuntimeError("Could not extract content from AZW3/MOBI file. The file might be DRM-protected.")
+    
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"Failed to read AZW3/MOBI file: {e}. Note: DRM-protected files are not supported.")
+    finally:
+        if tempdir:
+            try:
+                shutil.rmtree(tempdir, ignore_errors=True)
+            except:
+                pass
 
 
 def extract_txt(path):
@@ -972,6 +1046,12 @@ def analyze_file(path, ext):
                 n = None
             meta["unit_kind"] = "chapter"
             meta["units"] = n
+        elif ext in ("azw3", "mobi"):
+            blocks = extract_blocks(path, ext)
+            sections = sum(1 for b in blocks if b["type"] == "heading" and b["level"] == 1)
+            meta["unit_kind"] = "section"
+            meta["units"] = sections if sections else len(blocks)
+            meta["blocks"] = len(blocks)
         else:
             blocks = extract_blocks(path, ext)
             sections = sum(1 for b in blocks if b["type"] == "heading" and b["level"] == 1)
@@ -1390,12 +1470,12 @@ PAGE_HTML = r"""<!DOCTYPE html>
     <!-- TAB 1: DOCUMENT -->
     <section class="tab-panel active" id="tab-document">
       <h3 class="panel-title">Upload a document</h3>
-      <p class="hint">Supports PDF, DOCX, EPUB, Markdown, HTML and TXT &mdash; up to 60&nbsp;MB.</p>
+      <p class="hint">Supports PDF, DOCX, EPUB, MOBI, AZW3, Markdown, HTML and TXT &mdash; up to 60&nbsp;MB.</p>
       <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Upload a file">
         <div class="big">Drop a file here, or click to choose one</div>
-        <div class="small">.pdf &nbsp;.docx &nbsp;.epub &nbsp;.md &nbsp;.html &nbsp;.txt</div>
+        <div class="small">.pdf &nbsp;.docx &nbsp;.epub &nbsp;.mobi &nbsp;.azw3 &nbsp;.md &nbsp;.html &nbsp;.txt</div>
       </div>
-      <input type="file" id="fileInput" accept=".pdf,.docx,.epub,.md,.markdown,.html,.htm,.txt">
+      <input type="file" id="fileInput" accept=".pdf,.docx,.epub,.mobi,.azw3,.md,.markdown,.html,.htm,.txt">
       <div id="fileCard" style="display:none" class="file-card">
         <div>
           <div class="name" id="fileName"></div>
@@ -1911,4 +1991,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5034))
     debug = os.environ.get("FLASK_DEBUG", "0") == "1"
     app.run(host="0.0.0.0", port=port, debug=debug)
-
