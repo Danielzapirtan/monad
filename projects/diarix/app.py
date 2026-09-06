@@ -308,16 +308,8 @@ def run_pyannote(path, hf_token, num_speakers=None):
     pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-community-1", token=hf_token)
     diarization = pipeline(path, num_speakers=num_speakers) if num_speakers else pipeline(path)
 
-    # Community-1 provides an exclusive timeline specifically designed to
-    # align speaker turns with transcription segments. Keep the regular
-    # timeline as a compatibility fallback for older pipeline outputs.
-    annotation = getattr(
-        diarization,
-        "exclusive_speaker_diarization",
-        getattr(diarization, "speaker_diarization", diarization),
-    )
     turns = []
-    for turn, speaker in annotation:
+    for turn, speaker in diarization.speaker_diarization:
         turns.append({"start": turn.start, "end": turn.end, "speaker": speaker})
     return turns
 
@@ -671,23 +663,19 @@ def api_transcribe():
     all_segments = []
     try:
         for item in sources:
-            # For MLX engine, pass diarization parameters directly
-            if engine == "mlx" and diarize:
-                # whispermlx CLI handles diarization natively
-                segs = transcribe_file(
-                    item["path"], engine, language, device, model_size,
-                    hf_token=api_key, diarize=True
-                )
-            else:
-                segs = transcribe_file(
-                    item["path"], engine, language, device, model_size
-                )
+            # Keep transcription independent from diarization. In particular,
+            # whispermlx's native --diarize mode can alter/repeat transcription
+            # output; pyannote is applied below to these timestamped segments.
+            segs = transcribe_file(
+                item["path"], engine, language, device, model_size
+            )
             
             offset = item.get("start", 0.0)
             for s in segs:
                 segment = {"start": s["start"] + offset, "end": s["end"] + offset, "text": s["text"]}
-                # Preserve speaker info from MLX native diarization
-                if s.get("speaker"):
+                # Do not let native labels bypass the selected timestamp-based
+                # diarizer. Keep them only when diarization is not requested.
+                if s.get("speaker") and not diarize:
                     segment["speaker"] = s["speaker"]
                 all_segments.append(segment)
                 
@@ -696,8 +684,8 @@ def api_transcribe():
     except Exception as e:
         return jsonify(error=f"Transcription failed: {e}"), 500
 
-    # Handle diarization for non-MLX engines or when MLX didn't provide speakers
-    if diarize and not any(s.get("speaker") for s in all_segments):
+    # Apply the selected diarizer to the timestamped transcription.
+    if diarize:
         try:
             if diarize_method == "pyannote":
                 turns = []
