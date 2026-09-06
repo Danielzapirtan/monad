@@ -1,0 +1,10 @@
+#! /usr/bin/zsh
+
+myRC=$HOME/.zshrc
+myAliases=$HOME/.zsh_aliases
+
+if ! test -f $myAliases; then
+  echo "test -f $myAliases && source $myAliases" >>$myRC
+fi
+
+cp -a zsh_aliases $myAliases

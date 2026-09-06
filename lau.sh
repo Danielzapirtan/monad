@@ -20,8 +20,18 @@ test -n "$VER"
 
 export DEMO VER
 
+kill_old() {
+  for PORT in $PORTS; do
+    pids="$(lsof -i ":$PORT"|grep -v COMMAND|tr -s " " |cut -f 2 -d\ )"
+    test -n "$pids" && for pid in $pids; do
+      echo "killing process $pid (was using port $PORT)"
+      kill -term $pid 2>/dev/null
+    done
+  done
+}
+
 purge_pip() {
-  pkill -kill python$VER
+  kill_old
   command -v deactivate  && deactivate || true
   find . -type d -iname "venv" | xargs rm -rf || true
   find . -type d -iname ".venv" | xargs rm -rf || true
@@ -35,7 +45,7 @@ purge_pip() {
 }
 
 direct_pip() {
-  pkill -kill python$VER
+  kill_old
   command -v deactivate  && deactivate || true
   test -d .venv || python$VER -m venv .venv
   source .venv/bin/activate || return
@@ -48,13 +58,16 @@ launch_apps() {
   SCRIPT="test.sh"
   for APP in $APPS; do
     test -n "$APP"
-    bash "$SCRIPT" "$APP"  && echo "Launched $APP ok"
+    bash "$SCRIPT" "$APP" && echo "Launched $APP ok"
   done
 }
 
 warm=true
 test -n "$ARG" && echo "$ARG"|grep -q "^--cold$" && warm=false
 echo "Please wait ..."
+while ! ping -c 1 8.8.8.8 &>/dev/null; do
+  sleep 40
+done
 if $warm; then
   if direct_pip && launch_apps; then
     true

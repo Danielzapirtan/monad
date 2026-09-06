@@ -11,5 +11,4 @@ cd $HOME
 rm -rf $REPO
 git clone https://github.com/$OWNER/$REPO.git
 cd $REPO
-bash lau.sh --cold
 
