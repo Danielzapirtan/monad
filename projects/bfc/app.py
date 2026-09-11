@@ -86,7 +86,7 @@ APP_ROOT = tempfile.gettempdir()
 STORAGE_DIR = os.path.join(APP_ROOT, "docutil_storage")
 os.makedirs(STORAGE_DIR, exist_ok=True)
 
-MAX_CONTENT_LENGTH = 60 * 1024 * 1024  # 60 MB upload cap
+MAX_CONTENT_LENGTH = 150 * 1024 * 1024  # 150 MB upload cap
 SESSION_TTL_SECONDS = 2 * 60 * 60      # temp files older than this get swept
 
 ALLOWED_EXTENSIONS = {"pdf", "docx", "epub", "txt", "md", "markdown", "html", "htm"}
