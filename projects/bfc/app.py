@@ -1410,6 +1410,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .op-item.selected{border-color:var(--accent);background:var(--accent-soft)}
   .op-item .lbl{font-weight:600;font-size:.94rem}
   .op-item .desc{font-size:.8rem;color:var(--ink-soft);margin-top:2px}
+  .op-item.disabled-op{opacity:.45;cursor:not-allowed;background:#EFEFEF}
+  .op-item.disabled-op .lbl{color:var(--ink-soft)}
   .ctrl-block{display:none}
   .ctrl-block.active{display:block}
   .api-box{margin-top:18px;border:1px dashed var(--accent);border-radius:var(--radius);
@@ -1441,6 +1443,10 @@ PAGE_HTML = r"""<!DOCTYPE html>
        border:1px solid var(--accent);border-radius:6px;padding:6px 10px;white-space:nowrap}
   .ticket a.dl:hover{background:var(--accent-soft)}
   .empty-note{color:var(--ink-soft);font-size:.88rem;font-style:italic}
+  .file-list{margin-top:8px;display:flex;flex-direction:column;gap:4px}
+  .file-list .row{font-family:var(--mono);font-size:.78rem;color:var(--ink-soft);
+       display:flex;justify-content:space-between;gap:12px}
+  .file-list .row .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:400px}
   footer.site{margin-top:36px;padding-top:14px;border-top:1px solid var(--line);
        font-family:var(--mono);font-size:.72rem;color:var(--ink-soft);text-align:center}
   @media (max-width:600px){.panel{padding:18px}}
@@ -1465,19 +1471,20 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
     <!-- TAB 1: DOCUMENT -->
     <section class="tab-panel active" id="tab-document">
-      <h3 class="panel-title">Upload a document</h3>
-      <p class="hint">Supports PDF, DOCX, EPUB, Markdown, HTML and TXT &mdash; up to 60&nbsp;MB.</p>
-      <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Upload a file">
-        <div class="big">Drop a file here, or click to choose one</div>
+      <h3 class="panel-title">Upload document(s)</h3>
+      <p class="hint">Supports PDF, DOCX, EPUB, Markdown, HTML and TXT &mdash; up to 60&nbsp;MB. You can drop several files at once for batch conversion.</p>
+      <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Upload files">
+        <div class="big">Drop files here, or click to choose one or more</div>
         <div class="small">.pdf &nbsp;.docx &nbsp;.epub &nbsp;.md &nbsp;.html &nbsp;.txt</div>
       </div>
-      <input type="file" id="fileInput" accept=".pdf,.docx,.epub,.md,.markdown,.html,.htm,.txt">
+      <input type="file" id="fileInput" multiple accept=".pdf,.docx,.epub,.md,.markdown,.html,.htm,.txt">
       <div id="fileCard" style="display:none" class="file-card">
-        <div>
+        <div style="flex:1;min-width:0">
           <div class="name" id="fileName"></div>
           <div class="meta" id="fileMeta"></div>
+          <div class="file-list" id="fileList"></div>
         </div>
-        <button class="btn secondary" id="changeFileBtn" type="button">Change file</button>
+        <button class="btn secondary" id="changeFileBtn" type="button">Change files</button>
       </div>
       <div class="status" id="uploadStatus"></div>
       <div class="actions">
@@ -1493,22 +1500,22 @@ PAGE_HTML = r"""<!DOCTYPE html>
         <label class="op-item" data-op="convert">
           <input type="radio" name="op" value="convert">
           <div><div class="lbl">Convert to another format</div>
-          <div class="desc">Re-render headings and paragraphs into PDF, DOCX, EPUB, Markdown, HTML or TXT.</div></div>
+          <div class="desc">Re-render headings and paragraphs into PDF, DOCX, EPUB, Markdown, HTML or TXT. Works on one or many files.</div></div>
         </label>
         <label class="op-item" data-op="split">
           <input type="radio" name="op" value="split">
           <div><div class="lbl">Split by page / range</div>
-          <div class="desc">Cut a PDF by page ranges, an EPUB by chapter, or another format by top-level sections.</div></div>
+          <div class="desc">Cut a PDF by page ranges, an EPUB by chapter, or another format by top-level sections. (Single file only.)</div></div>
         </label>
         <label class="op-item" data-op="ai-split">
           <input type="radio" name="op" value="ai-split">
           <div><div class="lbl">Split smart by chapters (AI)</div>
-          <div class="desc">Let Claude or Gemini find natural chapter boundaries and split accordingly.</div></div>
+          <div class="desc">Let Claude or Gemini find natural chapter boundaries and split accordingly. (Single file only.)</div></div>
         </label>
         <label class="op-item" data-op="ai-toc">
           <input type="radio" name="op" value="ai-toc">
           <div><div class="lbl">Make an extremely detailed TOC (AI)</div>
-          <div class="desc">Ask Claude or Gemini to generate a deeply nested table of contents.</div></div>
+          <div class="desc">Ask Claude or Gemini to generate a deeply nested table of contents. (Single file only.)</div></div>
         </label>
       </div>
       <div class="actions">
@@ -1632,7 +1639,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
   "use strict";
   document.getElementById('year').textContent = new Date().getFullYear();
 
-  var state = { file: null, op: null, outputs: [] };
+  // state.files is now an array (previously a single object).
+  var state = { files: [], op: null, outputs: [] };
 
   function $(sel, root){ return (root||document).querySelector(sel); }
   function $all(sel, root){ return Array.prototype.slice.call((root||document).querySelectorAll(sel)); }
@@ -1671,18 +1679,20 @@ PAGE_HTML = r"""<!DOCTYPE html>
     dropzone.addEventListener(ev, function(e){ e.preventDefault(); dropzone.classList.remove('drag'); });
   });
   dropzone.addEventListener('drop', function(e){
-    var f = e.dataTransfer.files[0];
-    if (f) uploadFile(f);
+    var fs = Array.prototype.slice.call(e.dataTransfer.files);
+    if (fs.length) uploadFiles(fs);
   });
   fileInput.addEventListener('change', function(){
-    if (fileInput.files[0]) uploadFile(fileInput.files[0]);
+    var fs = Array.prototype.slice.call(fileInput.files);
+    if (fs.length) uploadFiles(fs);
   });
   $('#changeFileBtn').addEventListener('click', function(){
     fileInput.value = '';
     $('#fileCard').style.display = 'none';
     dropzone.style.display = 'block';
     $('#toOperationBtn').disabled = true;
-    state.file = null;
+    state.files = [];
+    refreshOpAvailability();
   });
 
   function unitLabel(meta){
@@ -1692,32 +1702,67 @@ PAGE_HTML = r"""<!DOCTYPE html>
     return n + ' ' + kind + (n===1 ? '' : 's') + ' detected.';
   }
 
-  function uploadFile(f){
+  function uploadFiles(fileList){
     var statusEl = $('#uploadStatus');
-    setStatus(statusEl, 'Uploading & analyzing\u2026', 'busy');
+    setStatus(statusEl, 'Uploading ' + fileList.length + ' file(s) & analyzing\u2026', 'busy');
     var fd = new FormData();
-    fd.append('file', f);
-    fetch('/api/upload', { method:'POST', body: fd })
+    fileList.forEach(function(f){ fd.append('files', f); });
+    fetch('/api/upload-batch', { method:'POST', body: fd })
       .then(function(r){ return r.json().then(function(j){ return {ok:r.ok, body:j}; }); })
       .then(function(res){
         if (!res.ok) { setStatus(statusEl, res.body.error || 'Upload failed.', 'err'); return; }
-        state.file = res.body;
+        state.files = res.body.files || [];
+        if (!state.files.length) {
+          setStatus(statusEl, 'No usable files uploaded.', 'err');
+          return;
+        }
         dropzone.style.display = 'none';
         $('#fileCard').style.display = 'flex';
-        $('#fileName').textContent = res.body.filename;
-        $('#fileMeta').textContent = res.body.ext.toUpperCase() + '  \u00b7  ' + unitLabel(res.body.meta);
-        setStatus(statusEl, '', '');
+        renderFileCard();
+        var errs = res.body.errors || [];
+        if (errs.length) {
+          setStatus(statusEl,
+            errs.length + ' file(s) rejected: ' +
+            errs.map(function(e){ return e.filename + ' (' + e.error + ')'; }).join('; '),
+            'err');
+        } else {
+          setStatus(statusEl, '', '');
+        }
         $('#toOperationBtn').disabled = false;
         unlockTab('operation');
+        refreshOpAvailability();
       })
       .catch(function(e){ setStatus(statusEl, 'Upload failed: ' + e, 'err'); });
+  }
+
+  function renderFileCard(){
+    if (state.files.length === 1) {
+      var f = state.files[0];
+      $('#fileName').textContent = f.filename;
+      $('#fileMeta').textContent = f.ext.toUpperCase() + '  \u00b7  ' + unitLabel(f.meta);
+      $('#fileList').innerHTML = '';
+    } else {
+      $('#fileName').textContent = state.files.length + ' files selected';
+      var detected = state.files.filter(function(f){ return f.meta && f.meta.units != null; }).length;
+      $('#fileMeta').textContent = 'Batch convert supported \u00b7 ' + detected + '/' + state.files.length + ' analyzed';
+      var listEl = $('#fileList');
+      listEl.innerHTML = '';
+      state.files.forEach(function(f){
+        var row = document.createElement('div');
+        row.className = 'row';
+        row.innerHTML = '<span class="nm">' + escapeHtml(f.filename) + '</span>' +
+                        '<span>' + f.ext.toUpperCase() + '</span>';
+        listEl.appendChild(row);
+      });
+    }
   }
 
   $('#toOperationBtn').addEventListener('click', function(){ activateTab('operation'); });
 
   // ---- Operation selection --------------------------------------------
   $all('.op-item').forEach(function(item){
-    item.addEventListener('click', function(){
+    item.addEventListener('click', function(e){
+      if (item.classList.contains('disabled-op')) { e.preventDefault(); return; }
       $all('.op-item').forEach(function(o){ o.classList.remove('selected'); });
       item.classList.add('selected');
       item.querySelector('input').checked = true;
@@ -1725,6 +1770,24 @@ PAGE_HTML = r"""<!DOCTYPE html>
       $('#toControlsBtn').disabled = false;
     });
   });
+
+  // Split / AI ops only make sense for a single file. Grey them out when
+  // more than one file is loaded.
+  function refreshOpAvailability(){
+    var multi = state.files.length > 1;
+    $all('.op-item').forEach(function(o){
+      var singleOnly = o.dataset.op !== 'convert';
+      var blocked = multi && singleOnly;
+      o.classList.toggle('disabled-op', blocked);
+      if (blocked && o.querySelector('input').checked) {
+        o.querySelector('input').checked = false;
+        o.classList.remove('selected');
+        state.op = null;
+        $('#toControlsBtn').disabled = true;
+      }
+    });
+  }
+
   $('#toControlsBtn').addEventListener('click', function(){
     renderControls();
     activateTab('controls');
@@ -1732,7 +1795,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
   // ---- Controls panel ---------------------------------------------------
   var TITLES = {
-    convert: ['Convert to another format', 'Pick the target format.'],
+    convert: ['Convert to another format', 'Pick the target format. All uploaded files will be converted.'],
     split: ['Split by page / range', 'Choose how to divide the document.'],
     'ai-split': ['Split smart by chapters', 'An AI model proposes chapter boundaries, then the document is split accordingly.'],
     'ai-toc': ['Make a detailed table of contents', 'An AI model reads the document and drafts a nested table of contents.']
@@ -1746,7 +1809,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
       opt.value = pair[0]; opt.textContent = pair[1];
       sel.appendChild(opt);
     });
-    if (state.file && excludeCurrent) sel.value = state.file.ext === 'markdown' ? 'md' : state.file.ext;
+    var f = state.files[0];
+    if (f && excludeCurrent) sel.value = f.ext === 'markdown' ? 'md' : f.ext;
   }
 
   function buildApiBox(container){
@@ -1791,7 +1855,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       populateFormatSelect($('#convertTarget'), false);
     }
     if (op === 'split') {
-      var meta = state.file.meta || {};
+      var meta = (state.files[0] && state.files[0].meta) || {};
       var kindLabel = meta.unit_kind === 'page' ? 'Pages' : (meta.unit_kind === 'chapter' ? 'Chapters' : 'Sections');
       $('#splitUnitLabel').textContent = kindLabel + ' \u2014 ' + unitLabel(meta);
       populateFormatSelect($('#splitTarget'), true);
@@ -1814,7 +1878,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
   function computeSplitSpec(){
     var mode = $all('input[name=splitMode]').filter(function(r){ return r.checked; })[0].value;
-    var total = (state.file.meta || {}).units || 0;
+    var total = (state.files[0] && state.files[0].meta ? state.files[0].meta.units : 0) || 0;
     if (mode === 'each') {
       var arr = [];
       for (var i=1;i<=total;i++) arr.push(i);
@@ -1888,25 +1952,42 @@ PAGE_HTML = r"""<!DOCTYPE html>
   });
 
   // ---- Action buttons -----------------------------------------------------
+
+  // Convert: batch endpoint, sends every uploaded file_id.
   $('#runConvertBtn').addEventListener('click', function(){
     var btn = this, statusEl = $('#convertStatus');
+    var ids = state.files.map(function(f){ return f.file_id; });
+    if (!ids.length) { setStatus(statusEl, 'No files uploaded.', 'err'); return; }
     btn.disabled = true;
-    setStatus(statusEl, 'Converting\u2026', 'busy');
-    fetch('/api/convert', {
+    setStatus(statusEl, 'Converting ' + ids.length + ' file(s)\u2026', 'busy');
+    fetch('/api/convert-batch', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ file_id: state.file.file_id, target_format: $('#convertTarget').value })
+      body: JSON.stringify({ file_ids: ids, target_format: $('#convertTarget').value })
     }).then(function(r){ return r.json().then(function(j){ return {ok:r.ok, body:j}; }); })
       .then(function(res){
         btn.disabled = false;
         if (!res.ok) { setStatus(statusEl, res.body.error, 'err'); return; }
-        setStatus(statusEl, 'Done.', 'ok');
-        addResults([res.body]);
-        activateTab('results');
+        var outs = res.body.outputs || [];
+        var errs = res.body.errors || [];
+        var msg = outs.length + ' file(s) converted.';
+        if (errs.length) {
+          msg += ' ' + errs.length + ' failed: ' + errs.map(function(e){
+            return (e.filename || e.file_id) + ' (' + e.error + ')';
+          }).join('; ');
+          setStatus(statusEl, msg, 'err');
+        } else {
+          setStatus(statusEl, msg, 'ok');
+        }
+        if (outs.length) {
+          addResults(outs);
+          activateTab('results');
+        }
       }).catch(function(e){ btn.disabled=false; setStatus(statusEl, ''+e, 'err'); });
   });
 
   $('#runSplitBtn').addEventListener('click', function(){
     var btn = this, statusEl = $('#splitStatus');
+    if (!state.files.length) { setStatus(statusEl, 'No file uploaded.', 'err'); return; }
     var spec;
     try { spec = computeSplitSpec(); } catch(e){ setStatus(statusEl, 'Invalid range.', 'err'); return; }
     if (!spec) { setStatus(statusEl, 'Please provide a range.', 'err'); return; }
@@ -1914,7 +1995,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     setStatus(statusEl, 'Splitting\u2026', 'busy');
     fetch('/api/split', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ file_id: state.file.file_id, spec: spec, target_format: $('#splitTarget').value })
+      body: JSON.stringify({ file_id: state.files[0].file_id, spec: spec, target_format: $('#splitTarget').value })
     }).then(function(r){ return r.json().then(function(j){ return {ok:r.ok, body:j}; }); })
       .then(function(res){
         btn.disabled = false;
@@ -1927,13 +2008,14 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
   $('#runAiSplitBtn').addEventListener('click', function(){
     var btn = this, statusEl = $('#aiSplitStatus');
+    if (!state.files.length) { setStatus(statusEl, 'No file uploaded.', 'err'); return; }
     var api = readApiBox(aiSplitBox);
     btn.disabled = true;
     setStatus(statusEl, 'Asking ' + api.provider + ' to analyze structure\u2026', 'busy');
     fetch('/api/ai/split', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
-        file_id: state.file.file_id, provider: api.provider, api_key: api.api_key,
+        file_id: state.files[0].file_id, provider: api.provider, api_key: api.api_key,
         model: api.model, target_format: $('#aiSplitTarget').value
       })
     }).then(function(r){ return r.json().then(function(j){ return {ok:r.ok, body:j}; }); })
@@ -1949,13 +2031,14 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
   $('#runAiTocBtn').addEventListener('click', function(){
     var btn = this, statusEl = $('#aiTocStatus');
+    if (!state.files.length) { setStatus(statusEl, 'No file uploaded.', 'err'); return; }
     var api = readApiBox(aiTocBox);
     btn.disabled = true;
     setStatus(statusEl, 'Asking ' + api.provider + ' to draft a table of contents\u2026', 'busy');
     fetch('/api/ai/toc', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
-        file_id: state.file.file_id, provider: api.provider, api_key: api.api_key,
+        file_id: state.files[0].file_id, provider: api.provider, api_key: api.api_key,
         model: api.model, depth: $('#tocDepth').value
       })
     }).then(function(r){ return r.json().then(function(j){ return {ok:r.ok, body:j}; }); })
