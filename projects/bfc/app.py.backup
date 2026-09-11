@@ -992,82 +992,6 @@ def index():
     return Response(PAGE_HTML, mimetype="text/html")
 
 
-@app.route("/api/upload-batch", methods=["POST"])
-def api_upload_batch():
-    files = request.files.getlist("files")
-    if not files:
-        return jsonify(error="No files in the request."), 400
-
-    results = []
-    errors = []
-    for f in files:
-        if not f or f.filename == "":
-            continue
-        filename = secure_filename(f.filename)
-        if not filename or "." not in filename:
-            errors.append({"filename": f.filename, "error": "Invalid filename."})
-            continue
-        ext = filename.rsplit(".", 1)[-1].lower()
-        if ext not in ALLOWED_EXTENSIONS:
-            errors.append({"filename": filename, "error": f"Unsupported type '.{ext}'."})
-            continue
-
-        file_id = uuid.uuid4().hex
-        stored_name = f"{file_id}.{ext}"
-        dest = os.path.join(session_dir(), stored_name)
-        try:
-            f.save(dest)
-        except Exception as e:
-            errors.append({"filename": filename, "error": f"Save failed: {e}"})
-            continue
-
-        meta = analyze_file(dest, ext)
-        register_file(file_id, filename, ext, stored_name, meta)
-        results.append({
-            "file_id": file_id,
-            "filename": filename,
-            "ext": ext,
-            "meta": meta,
-        })
-
-    return jsonify({"files": results, "errors": errors})
-
-
-@app.route("/api/convert-batch", methods=["POST"])
-def api_convert_batch():
-    data = request.get_json(force=True, silent=True) or {}
-    file_ids = data.get("file_ids") or []
-    target = (data.get("target_format") or "").lower()
-
-    if target not in TARGET_FORMATS:
-        return jsonify(error="Unsupported target format."), 400
-    if not file_ids:
-        return jsonify(error="No files provided."), 400
-
-    outputs = []
-    errors = []
-    for file_id in file_ids:
-        if not valid_id(file_id):
-            errors.append({"file_id": file_id, "error": "Invalid file reference."})
-            continue
-        rec = get_file_record(file_id)
-        if not rec:
-            errors.append({"file_id": file_id, "error": "File not found or expired."})
-            continue
-        try:
-            blocks = extract_blocks(rec["abs_path"], rec["ext"])
-            out_id = uuid.uuid4().hex
-            stored_name = f"{out_id}.{target}"
-            out_path = os.path.join(session_dir(), stored_name)
-            render_blocks(blocks, target, out_path)
-            fname = f"{safe_stem(rec['filename'])}.{target}"
-            register_output(out_id, fname, target, stored_name)
-            outputs.append({"output_id": out_id, "filename": fname})
-        except Exception as e:
-            errors.append({"file_id": file_id, "filename": rec["filename"], "error": str(e)})
-
-    return jsonify({"outputs": outputs, "errors": errors})
-
 @app.route("/api/upload", methods=["POST"])
 def api_upload():
     if "file" not in request.files:
@@ -1987,3 +1911,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5034))
     debug = os.environ.get("FLASK_DEBUG", "0") == "1"
     app.run(host="0.0.0.0", port=port, debug=debug)
+
