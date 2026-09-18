@@ -1,6 +1,6 @@
 # Document Utilities
 
-A single-file Flask app (`app.py`) for converting and splitting documents,
+A single-file Flask app (`app.py`) for converting, merging, and splitting documents,
 with optional AI-assisted chapter splitting and table-of-contents generation.
 The entire UI (HTML/CSS/JS) is embedded in `app.py` — there are no template
 files or static assets to manage.
@@ -33,12 +33,14 @@ will return a clear error message telling you what to install.
 1. **Upload** a PDF, DOCX, AZW3, EPUB, Markdown, HTML, or TXT file (150 MB limit).
 2. **Convert** supported documents to the available formats. AZW3 files use
    KindleUnpack and can be converted to EPUB (EPUB 2) only.
-3. **Split by page/range** — page ranges for PDF, chapter ranges for EPUB, or
+3. **Merge PDFs** — combine two or more uploaded PDF files into one PDF, in
+   upload order.
+4. **Split by page/range** — page ranges for PDF, chapter ranges for EPUB, or
    ranges over top-level (`#` / Heading 1) sections for the other formats.
-4. **Split smart by chapters (AI)** — sends a structural outline (not the
+5. **Split smart by chapters (AI)** — sends a structural outline (not the
    whole document) to Claude or Gemini, asks it to propose chapter
    boundaries, and splits accordingly.
-5. **Make a detailed table of contents (AI)** — sends the document's text
+6. **Make a detailed table of contents (AI)** — sends the document's text
    (headings + paragraphs, truncated if very long) to Claude or Gemini and
    asks for a deeply nested Markdown TOC.
 

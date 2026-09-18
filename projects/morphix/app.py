@@ -791,6 +791,22 @@ def _split_pdf(src_path, ranges, out_dir):
     raise RuntimeError("Splitting PDF files requires PyMuPDF or pypdf.")
 
 
+def merge_pdfs(src_paths, out_path):
+    """Merge two or more PDF files in the supplied order."""
+    if len(src_paths) < 2:
+        raise ValueError("Merging requires at least two PDF files.")
+    if PdfReader is None or PdfWriter is None:
+        raise RuntimeError("Merging PDF files requires pypdf or PyPDF2.")
+
+    writer = PdfWriter()
+    for src_path in src_paths:
+        reader = PdfReader(src_path)
+        for page in reader.pages:
+            writer.add_page(page)
+    with open(out_path, "wb") as f:
+        writer.write(f)
+
+
 def split_epub(src_path, ranges, out_dir):
     if epub is None:
         raise RuntimeError("EbookLib is required to split EPUB files.")
@@ -1407,6 +1423,40 @@ def api_split():
     return jsonify({"parts": results})
 
 
+@app.route("/api/merge", methods=["POST"])
+def api_merge():
+    data = request.get_json(force=True, silent=True) or {}
+    file_ids = data.get("file_ids") or []
+
+    if len(file_ids) < 2:
+        return jsonify(error="Merging requires at least two PDF files."), 400
+
+    records = []
+    for file_id in file_ids:
+        if not valid_id(file_id):
+            return jsonify(error="Invalid file reference."), 400
+        rec = get_file_record(file_id)
+        if not rec:
+            return jsonify(error="File not found or session expired. Please re-upload."), 404
+        if rec["ext"] != "pdf":
+            return jsonify(error="Merge currently supports PDF files only."), 400
+        records.append(rec)
+
+    out_id = uuid.uuid4().hex
+    stored_name = f"{out_id}.pdf"
+    out_path = os.path.join(session_dir(), stored_name)
+    try:
+        merge_pdfs([rec["abs_path"] for rec in records], out_path)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    except Exception as e:
+        return jsonify(error=f"Merge failed: {e}"), 500
+
+    filename = "merged.pdf"
+    register_output(out_id, filename, "pdf", stored_name)
+    return jsonify({"output_id": out_id, "filename": filename})
+
+
 @app.route("/api/ai/split", methods=["POST"])
 def api_ai_split():
     data = request.get_json(force=True, silent=True) or {}
@@ -1755,6 +1805,11 @@ PAGE_HTML = r"""<!DOCTYPE html>
           <div><div class="lbl">Convert to another format</div>
           <div class="desc">Re-render headings and paragraphs into PDF, DOCX, EPUB, Markdown, HTML or TXT. Works on one or many files.</div></div>
         </label>
+        <label class="op-item" data-op="merge">
+          <input type="radio" name="op" value="merge">
+          <div><div class="lbl">Merge PDF files</div>
+          <div class="desc">Combine two or more PDF files into one PDF, in the order they were uploaded.</div></div>
+        </label>
         <label class="op-item" data-op="split">
           <input type="radio" name="op" value="split">
           <div><div class="lbl">Split by page / range</div>
@@ -1794,6 +1849,11 @@ PAGE_HTML = r"""<!DOCTYPE html>
         </select>
         <div class="actions"><button class="btn accent" id="runConvertBtn" type="button">Convert</button></div>
         <div class="status" id="convertStatus"></div>
+      </div>
+
+      <div class="ctrl-block" id="ctrl-merge">
+        <div class="actions"><button class="btn accent" id="runMergeBtn" type="button">Merge PDF files</button></div>
+        <div class="status" id="mergeStatus"></div>
       </div>
 
       <div class="ctrl-block" id="ctrl-split">
@@ -2026,14 +2086,17 @@ PAGE_HTML = r"""<!DOCTYPE html>
     });
   });
 
-  // Split / AI ops only make sense for a single file. Grey them out when
-  // more than one file is loaded.
+  // Split / AI ops only make sense for a single file. Merge requires two or
+  // more PDFs, while conversion is available for every uploaded file type.
   function refreshOpAvailability(){
     var multi = state.files.length > 1;
     var hasAzw3 = state.files.some(function(f){ return f.ext === 'azw3'; });
+    var allPdf = state.files.length > 0 && state.files.every(function(f){ return f.ext === 'pdf'; });
     $all('.op-item').forEach(function(o){
-      var singleOnly = o.dataset.op !== 'convert';
-      var blocked = (multi || hasAzw3) && singleOnly;
+      var op = o.dataset.op;
+      var blocked = op === 'merge'
+        ? !(state.files.length >= 2 && allPdf)
+        : op !== 'convert' && (multi || hasAzw3);
       o.classList.toggle('disabled-op', blocked);
       if (blocked && o.querySelector('input').checked) {
         o.querySelector('input').checked = false;
@@ -2052,6 +2115,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   // ---- Controls panel ---------------------------------------------------
   var TITLES = {
     convert: ['Convert to another format', 'Pick the target format. All uploaded files will be converted.'],
+    merge: ['Merge PDF files', 'Combine the uploaded PDF files in their current order.'],
     split: ['Split by page / range', 'Choose how to divide the document.'],
     'ai-split': ['Split smart by chapters', 'An AI model proposes chapter boundaries, then the document is split accordingly.'],
     'ai-toc': ['Make a detailed table of contents', 'An AI model reads the document and drafts a nested table of contents.']
@@ -2114,6 +2178,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
         option.disabled = hasAzw3 && option.value !== 'epub';
       });
       if (hasAzw3) $('#convertTarget').value = 'epub';
+    }
+    if (op === 'merge') {
+      $('#controlsHint').textContent = 'At least two PDF files are required.';
     }
     if (op === 'split') {
       var meta = (state.files[0] && state.files[0].meta) || {};
@@ -2243,6 +2310,29 @@ PAGE_HTML = r"""<!DOCTYPE html>
           addResults(outs);
           activateTab('results');
         }
+      }).catch(function(e){ btn.disabled=false; setStatus(statusEl, ''+e, 'err'); });
+  });
+
+  $('#runMergeBtn').addEventListener('click', function(){
+    var btn = this, statusEl = $('#mergeStatus');
+    var ids = state.files.map(function(f){ return f.file_id; });
+    if (ids.length < 2) { setStatus(statusEl, 'Select at least two PDF files.', 'err'); return; }
+    if (!state.files.every(function(f){ return f.ext === 'pdf'; })) {
+      setStatus(statusEl, 'Merge currently supports PDF files only.', 'err');
+      return;
+    }
+    btn.disabled = true;
+    setStatus(statusEl, 'Merging ' + ids.length + ' PDF file(s)\u2026', 'busy');
+    fetch('/api/merge', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ file_ids: ids })
+    }).then(function(r){ return r.json().then(function(j){ return {ok:r.ok, body:j}; }); })
+      .then(function(res){
+        btn.disabled = false;
+        if (!res.ok) { setStatus(statusEl, res.body.error, 'err'); return; }
+        setStatus(statusEl, 'Merged PDF created.', 'ok');
+        addResults([res.body]);
+        activateTab('results');
       }).catch(function(e){ btn.disabled=false; setStatus(statusEl, ''+e, 'err'); });
   });
 
