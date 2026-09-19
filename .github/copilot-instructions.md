@@ -2,17 +2,16 @@
 
 ## Repository shape
 
-This repo is a launcher + collection of independent local Flask apps under `projects/`.
+This repo is a launcher plus a small set of self-contained Flask apps in `projects/`. The current checkout contains the app directories `diarix` and `morphix`; treat each app as independent rather than as a shared monorepo service.
 
-- `lau.sh` is the main orchestration entry point.
-- `test.sh` validates a single app by installing that app's requirements and starting `python app.py`.
-- `index.html` is a small landing page pointing at the local app URLs.
-- Each app is self-contained: usually a `requirements.txt` and a single `app.py` (often with embedded HTML/CSS/JS, not templates/static folders).
-- The project is intentionally local/single-user tooling, not a production web deployment.
+- Root scripts (`lau.sh`, `test.sh`) orchestrate startup and environment setup.
+- `index.html` is just a landing page for local app URLs.
+- Each app usually has its own `app.py`, `requirements.txt`, and optional project README.
+- UI code is typically embedded directly in `app.py`; there is no shared frontend framework or common app server.
 
-## Build, test, and validation commands
+## Build, test, and lint commands
 
-There is no formal Python test suite or lint configuration in this repo. The practical validation paths are the launcher and per-app startup checks documented by the project.
+There is no formal Python test suite or lint runner in this repo. The practical validation path is startup-level verification via the launcher and individual app check scripts.
 
 Run the full stack from the repo root:
 
@@ -20,21 +19,20 @@ Run the full stack from the repo root:
 ./lau.sh
 ```
 
-Recreate the virtual environment and reinstall dependencies:
+Recreate the environment from scratch, including clearing virtualenvs and reinstalling dependencies:
 
 ```bash
 ./lau.sh --cold
 ```
 
-Validate one app by name:
+Validate a single app by name:
 
 ```bash
 bash ./test.sh diarix
-bash ./test.sh bfc
-bash ./test.sh vd
+bash ./test.sh morphix
 ```
 
-For a manual app startup, follow the pattern used by each project:
+Manual app startup pattern:
 
 ```bash
 cd projects/diarix
@@ -44,52 +42,55 @@ pip install -r requirements.txt
 python app.py
 ```
 
-The same pattern applies to `bfc` and `vd` using their respective directories and requirements files.
+Use the same pattern for `projects/morphix` with its own `requirements.txt`.
 
 ## High-level architecture
 
 ### Root launcher model
 
-`lau.sh` does the coordination work that matters across the whole repo:
+`lau.sh` does the cross-app coordination work:
 
-- discovers apps under `projects/`
-- exports `DEMO` and `VER` environment variables
-- kills any old processes listening on the app ports
-- creates/reuses a root `.venv`
-- runs `test.sh` for each app to install dependencies and verify startup
-- waits for network connectivity before launching
+- discovers app directories under `projects/`
+- exports `DEMO` and `VER` for the current platform/Python version
+- kills stale processes already bound to the app ports
+- creates or reuses a root `.venv`
+- runs `test.sh` for each app to install dependencies and confirm startup
+- waits for external connectivity before declaring the stack ready
 
-This means app startup order, environment setup, and port cleanup are managed centrally rather than by each app individually.
+This means startup order, dependency installation, port cleanup, and environment setup are centralized at the repo root instead of being managed per app.
 
 ### App-level architecture
 
-Each app under `projects/` is functionally independent and usually follows the same pattern:
+Each app under `projects/` is functionally standalone:
 
 - a Flask app in `app.py`
-- embedded UI code (HTML/CSS/JS) in the same file
-- a project-specific `requirements.txt`
-- optional documentation such as a `README.md` or `spec.md`
+- app-local Python dependencies in `requirements.txt`
+- embedded HTML/CSS/JS in the same file when the app is a single-file UI
+- optional README/spec notes describing the app's behavior and environment variables
 
-The repo is not organized around a shared backend or library. Instead, each application is a standalone tool with its own dependency set and operational assumptions.
+There is no shared backend library or cross-app service layer. When making code changes, keep them in the target app directory unless the root launcher script itself needs to change.
 
-Examples from the repo:
+### Operational conventions
 
-- `projects/diarix`: media editor / cut + transcribe workflow
-- `projects/bfc`: document utility app with optional AI chapter and TOC generation
-- `projects/vd`: video download / media processing app
-- `projects/pdfutils`: document conversion utility app
+`test.sh` is the repo's startup verification tool. It:
 
-The root `index.html` simply exposes links to the local app URLs and is not the application logic itself.
+- changes into `./projects/$APP`
+- installs that app's requirements with `python$VER -m pip install -r requirements.txt`
+- runs that app in the background with `python$VER app.py &`
+- waits briefly and confirms the process exists at `/proc/$pid`
+
+That startup check is the primary validation signal in this codebase; there is no CI suite to substitute for it.
 
 ## Key conventions
 
-- All main apps are Flask apps and are expected to run directly with `python app.py`.
-- UI code is embedded in `app.py` rather than split into templates/static folders; keep that pattern unless the project explicitly documents a different structure.
-- App-specific dependencies are isolated in each project's `requirements.txt` rather than a repo-wide package manifest.
-- `lau.sh` and `test.sh` are the repo's operational conventions for environment setup, startup verification, and port cleanup.
-- The apps are local tools intended for trusted-network or single-user use. Do not treat them as production-ready without adding auth, rate limits, and deployment safeguards.
-- AI-enabled features may rely on environment variables like `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, or app-specific secret keys; check the project README/spec before adding or changing those integrations.
+- Keep app changes local to the relevant `projects/<app>/` directory.
+- Do not introduce a repo-wide Python package or shared service layer unless the app docs explicitly require it.
+- If a change adds a dependency, update that app's `requirements.txt` rather than a root dependency file.
+- Prefer the existing app-local structure: `app.py` + embedded front-end logic + project-specific requirements, unless a given app README documents a different layout.
+- Treat these apps as local/single-user tools rather than production services; they are not protected by auth, rate limiting, or hardened deployment defaults.
+- Check app-specific README/spec files before wiring in secret environment variables such as `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, or project-specific key names.
+- The repo has stale references in older docs; verify the actual `projects/` directory before assuming app names or port assumptions from older README snippets.
 
 ## Notes for future sessions
 
-When modifying code, prefer the same app-local structure used by the project: keep the work within the relevant `projects/<app>/` directory, update the app's requirements if a new library is added, and validate with the project startup pattern rather than introducing an unrelated monorepo framework.
+When modifying code, validate with the repo's startup pattern (`./lau.sh` or `bash ./test.sh <app>`) rather than adding unrelated frameworks or a broad test harness that does not match this project.
