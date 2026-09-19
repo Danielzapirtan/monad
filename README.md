@@ -142,3 +142,11 @@
   services. They are not protected by authentication or deployment hardening by
   default; do not expose them directly to an untrusted network without adding
   those safeguards.
+
+  ## Native Android app
+
+  A browser-free native Android implementation is under `android/`. It is a
+  standalone Kotlin/Compose application and does not run the Flask services.
+  Its supported scope follows Morphix and Diarix while intentionally excluding
+  AZW3, YouTube ingestion, and pyannote diarization. See
+  `android/README.md` for the current implementation status and build steps.

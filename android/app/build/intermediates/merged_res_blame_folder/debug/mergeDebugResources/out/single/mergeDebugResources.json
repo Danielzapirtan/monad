@@ -1,0 +1,6 @@
+[
+    {
+        "merged": "com.monad.nativeapp-debug-48:/xml_file_paths.xml.flat",
+        "source": "com.monad.nativeapp-main-50:/xml/file_paths.xml"
+    }
+]
