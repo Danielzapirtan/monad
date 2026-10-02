@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
@@ -36,6 +37,8 @@ os.makedirs(BASE_DIR, exist_ok=True)
 
 # in-memory session registry: sid -> {dir, source, chunks, transcript, segments, ...}
 SESSIONS = {}
+MODEL_CACHE = {}
+MODEL_LOCK = threading.Lock()
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
@@ -91,6 +94,22 @@ def wipe_session_dir(sess):
     sess["source_files"] = []
     sess["multifile"] = False
     sess["transcriptions"] = []
+    sess["transcript_path"] = None
+
+
+def persist_transcript(sess, name, transcript):
+    """Persist a transcript to disk so partial results survive restarts."""
+    out_dir = os.path.join(sess["dir"], "transcripts")
+    os.makedirs(out_dir, exist_ok=True)
+    base = secure_filename(os.path.splitext(name or "transcript")[0]) or "transcript"
+    candidate = os.path.join(out_dir, f"{base}.txt")
+    suffix = 1
+    while os.path.exists(candidate):
+        candidate = os.path.join(out_dir, f"{base}_{suffix}.txt")
+        suffix += 1
+    with open(candidate, "w", encoding="utf-8") as fh:
+        fh.write(transcript)
+    return candidate
 
 
 def fmt_ts(t):
@@ -191,23 +210,39 @@ def cut_chunk(source_path, kind, start, end, out_path):
 # transcription engines
 # --------------------------------------------------------------------------
 
+def get_cached_openai_whisper_model(device, model_size):
+    key = ("openai-whisper", device, model_size)
+    with MODEL_LOCK:
+        if key not in MODEL_CACHE:
+            try:
+                import whisper
+            except ImportError:
+                raise RuntimeError("openai-whisper is not installed on the server (pip install openai-whisper).")
+            MODEL_CACHE[key] = whisper.load_model(model_size, device=device)
+        return MODEL_CACHE[key]
+
+
+def get_cached_faster_whisper_model(device, model_size):
+    key = ("faster-whisper", device, model_size)
+    with MODEL_LOCK:
+        if key not in MODEL_CACHE:
+            try:
+                from faster_whisper import WhisperModel
+            except ImportError:
+                raise RuntimeError("faster-whisper is not installed on the server (pip install faster-whisper).")
+            compute_type = "float16" if device == "cuda" else "int8"
+            MODEL_CACHE[key] = WhisperModel(model_size, device=device, compute_type=compute_type)
+        return MODEL_CACHE[key]
+
+
 def run_whisper_openai(path, language, device, model_size):
-    try:
-        import whisper
-    except ImportError:
-        raise RuntimeError("openai-whisper is not installed on the server (pip install openai-whisper).")
-    model = whisper.load_model(model_size, device=device)
+    model = get_cached_openai_whisper_model(device, model_size)
     result = model.transcribe(path, language=language, verbose=False)
     return [{"start": s["start"], "end": s["end"], "text": s["text"].strip()} for s in result["segments"]]
 
 
 def run_faster_whisper(path, language, device, model_size):
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError:
-        raise RuntimeError("faster-whisper is not installed on the server (pip install faster-whisper).")
-    compute_type = "float16" if device == "cuda" else "int8"
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
+    model = get_cached_faster_whisper_model(device, model_size)
     segments, _info = model.transcribe(path, language=language)
     return [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in segments]
 
@@ -330,14 +365,22 @@ def get_mlx_worker_count():
 # diarization
 # --------------------------------------------------------------------------
 
+def get_cached_pyannote_pipeline(hf_token):
+    key = ("pyannote", hf_token)
+    with MODEL_LOCK:
+        if key not in MODEL_CACHE:
+            try:
+                from pyannote.audio import Pipeline
+            except ImportError:
+                raise RuntimeError("pyannote.audio is not installed on the server (pip install pyannote.audio).")
+            if not hf_token:
+                raise RuntimeError("A Hugging Face access token is required for pyannote diarization.")
+            MODEL_CACHE[key] = Pipeline.from_pretrained("pyannote/speaker-diarization-community-1", token=hf_token)
+        return MODEL_CACHE[key]
+
+
 def run_pyannote(path, hf_token, num_speakers=None):
-    try:
-        from pyannote.audio import Pipeline
-    except ImportError:
-        raise RuntimeError("pyannote.audio is not installed on the server (pip install pyannote.audio).")
-    if not hf_token:
-        raise RuntimeError("A Hugging Face access token is required for pyannote diarization.")
-    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-community-1", token=hf_token)
+    pipeline = get_cached_pyannote_pipeline(hf_token)
     diarization = pipeline(path, num_speakers=num_speakers) if num_speakers else pipeline(path)
 
     turns = []
@@ -366,6 +409,12 @@ def run_ai_diarization(segments, provider, api_key, num_speakers=None):
     """Heuristic, text-based speaker labeling via an LLM (no separate audio model)."""
     if not api_key:
         raise RuntimeError("An API key is required for AI-based diarization.")
+    if len(segments) > 120:
+        labels = []
+        for idx in range(0, len(segments), 120):
+            chunk = segments[idx:idx + 120]
+            labels.extend(run_ai_diarization(chunk, provider, api_key, num_speakers))
+        return labels
 
     payload = [{"i": i, "start": round(s["start"], 2), "end": round(s["end"], 2), "text": s["text"]}
                for i, s in enumerate(segments)]
@@ -393,7 +442,7 @@ def run_ai_diarization(segments, provider, api_key, num_speakers=None):
         client = anthropic.Anthropic(api_key=api_key)
         resp = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=2000,
+            max_tokens=8000,
             messages=[{"role": "user", "content": prompt}],
         )
         text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
@@ -546,6 +595,7 @@ def api_load():
         first = sess["source_files"][0]
         sess["source"] = {
             "path": first["path"],
+            "name": first["name"],
             "ext": first["ext"],
             "kind": first["kind"],
             "duration": first["duration"],
@@ -626,6 +676,7 @@ def api_load():
 
         sess["source"] = {
             "path": src_path,
+            "name": os.path.basename(src_path),
             "ext": os.path.splitext(src_path)[1],
             "kind": info["kind"],
             "duration": info["duration"],
@@ -834,45 +885,33 @@ def api_transcribe():
     ai_provider = d.get("ai_provider")                 # 'gemini' | 'claude'
     api_key = d.get("api_key")
     num_speakers = d.get("num_speakers")
+    file_index = d.get("file_index")
 
-    # ---- multi-file path: one transcription per source file, NOT concatenated ----
     if sess.get("multifile"):
+        source_files = sess["source_files"]
+        if file_index is not None:
+            try:
+                file_index = int(file_index)
+            except (TypeError, ValueError):
+                return jsonify(error="Invalid file index."), 400
+            if file_index < 0 or file_index >= len(source_files):
+                return jsonify(error="File index out of range."), 400
+            source_files = [source_files[file_index]]
+
         results = []
         errors = []
         try:
-            # Transcribe files in turn (not simultaneously), even for mlx
-            if False and engine == "mlx":
-                workers = get_mlx_worker_count()
-                with ThreadPoolExecutor(max_workers=workers) as executor:
-                    futures = [
-                        executor.submit(
-                            transcribe_file,
-                            f["path"], engine, language, device, model_size,
-                            api_key, diarize,
-                        )
-                        for f in sess["source_files"]
-                    ]
-                    transcriptions = []
-                    for f, future in zip(sess["source_files"], futures):
-                        try:
-                            transcriptions.append((f, future.result()))
-                        except Exception as e:
-                            errors.append({"name": f["name"], "error": str(e)})
-            else:
-                transcriptions = [
-                    (
-                        f,
-                        transcribe_file(
-                            f["path"], engine, language, device, model_size,
-                            hf_token=api_key,
-                            diarize=False,
-                        ),
+            for f in source_files:
+                try:
+                    segs = transcribe_file(
+                        f["path"], engine, language, device, model_size,
+                        hf_token=api_key if diarize_method == "pyannote" and engine == "mlx" else None,
+                        diarize=(engine == "mlx" and diarize and diarize_method == "pyannote"),
                     )
-                    for f in sess["source_files"]
-                ]
+                except Exception as exc:
+                    errors.append({"name": f["name"], "error": str(exc)})
+                    continue
 
-            for f, segs in transcriptions:
-                # ensure segment dicts are JSON-safe and have consistent keys
                 norm_segs = []
                 for s in segs:
                     seg = {
@@ -884,7 +923,6 @@ def api_transcribe():
                         seg["speaker"] = s["speaker"]
                     norm_segs.append(seg)
 
-                # diarization for non-MLX engines (per file)
                 if diarize and not any(s.get("speaker") for s in norm_segs):
                     if diarize_method == "pyannote":
                         turns = run_pyannote(f["path"], api_key, num_speakers)
@@ -901,34 +939,31 @@ def api_transcribe():
                     prefix = f"{seg['speaker']}: " if seg.get("speaker") else ""
                     lines.append(f"[{fmt_ts(seg['start'])} - {fmt_ts(seg['end'])}] {prefix}{seg['text']}")
                 text = "\n".join(lines)
-
-                results.append({
-                    "name": f["name"],
-                    "transcript": text,
-                    "segments": norm_segs,
-                })
+                result = {"name": f["name"], "transcript": text, "segments": norm_segs}
+                result["txt_path"] = persist_transcript(sess, f["name"], text)
+                results.append(result)
         except RuntimeError as e:
             return jsonify(error=str(e)), 500
         except Exception as e:
             return jsonify(error=f"Transcription failed: {e}"), 500
 
         sess["transcriptions"] = results
-        # For convenience: also keep a combined transcript for the ZIP export.
-        sess["transcript"] = "\n\n".join(
-            f"===== {r['name']} =====\n{r['transcript']}" for r in results
-        )
-        sess["segments"] = []  # no combined segments in multi-file mode
+        if results:
+            sess["transcript"] = "\n\n".join(
+                f"===== {r['name']} =====\n{r['transcript']}" for r in results
+            )
+        sess["segments"] = []
 
-        return jsonify(
-            multifile=True,
-            transcriptions=results,
-            errors=errors,
-            # Provide an empty combined transcript so the single-textarea UI
-            # still works if someone falls back to it; but frontend will use
-            # `transcriptions` for multi-file.
-            transcript="",
-            segments=[],
-        )
+        response = {
+            "multifile": True,
+            "transcriptions": results,
+            "errors": errors,
+            "transcript": "",
+            "segments": [],
+        }
+        if file_index is not None:
+            response["file_index"] = file_index
+        return jsonify(response)
 
     # ---- single-file path (unchanged behavior) ----
     sources = sess["chunks"] if sess["chunks"] else [{
@@ -939,15 +974,12 @@ def api_transcribe():
     all_segments = []
     try:
         for item in sources:
-            if engine == "mlx" and diarize:
-                segs = transcribe_file(
-                    item["path"], engine, language, device, model_size,
-                    hf_token=api_key, diarize=True
-                )
-            else:
-                segs = transcribe_file(
-                    item["path"], engine, language, device, model_size
-                )
+            mlx_diarize = engine == "mlx" and diarize and diarize_method == "pyannote"
+            segs = transcribe_file(
+                item["path"], engine, language, device, model_size,
+                hf_token=api_key if mlx_diarize else None,
+                diarize=mlx_diarize,
+            )
 
             offset = item.get("start", 0.0)
             for s in segs:
@@ -992,6 +1024,7 @@ def api_transcribe():
         lines.append(f"[{fmt_ts(seg['start'])} - {fmt_ts(seg['end'])}] {prefix}{seg['text']}")
     transcript = "\n".join(lines)
     sess["transcript"] = transcript
+    sess["transcript_path"] = persist_transcript(sess, sess["source"]["name"] if sess.get("source") and sess["source"].get("name") else "transcription", transcript)
     sess["segments"] = all_segments
     sess["transcriptions"] = []
     return jsonify(transcript=transcript, segments=all_segments)
@@ -1035,6 +1068,8 @@ def download_transcription():
     sess = get_session(sid) if sid else None
     if not sess or not sess.get("transcript"):
         abort(404)
+    if sess.get("transcript_path") and os.path.exists(sess["transcript_path"]):
+        return send_file(sess["transcript_path"], as_attachment=True, download_name=os.path.basename(sess["transcript_path"]), mimetype="text/plain")
     buf = io.BytesIO(sess["transcript"].encode("utf-8"))
     buf.seek(0)
     return send_file(buf, as_attachment=True, download_name="transcription.txt", mimetype="text/plain")
@@ -1051,6 +1086,9 @@ def download_transcription_indexed(idx):
     if idx < 0 or idx >= len(transcriptions):
         abort(404)
     item = transcriptions[idx]
+    txt_path = item.get("txt_path")
+    if txt_path and os.path.exists(txt_path):
+        return send_file(txt_path, as_attachment=True, download_name=os.path.basename(txt_path), mimetype="text/plain")
     base = os.path.splitext(item.get("name", f"transcription_{idx}"))[0] or f"transcription_{idx}"
     fname = f"{base}.txt"
     buf = io.BytesIO(item["transcript"].encode("utf-8"))
@@ -1568,7 +1606,7 @@ function toast(msg){
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toast._h);
-  toast._h = setTimeout(()=>t.classList.remove('show'), 120000);
+  toast._h = setTimeout(()=>t.classList.remove('show'), 12000);
 }
 function fmtTs(t){
   t = Math.max(0,t);
@@ -2213,4 +2251,4 @@ document.getElementById('downloadZipBtnMulti').addEventListener('click', ()=>{
 """
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5030)
+    app.run(debug=True, use_reloader=False, threaded=True, host="0.0.0.0", port=5030)
