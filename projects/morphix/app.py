@@ -861,33 +861,64 @@ def split_document(src_path, ext, ranges, target_ext, out_dir):
 # ---- AI helpers -----------------------------------------------------------
 
 SPLIT_SYSTEM_PROMPT = (
-"""You are analyzing a PDF document. Identify every top-level section that should become its own standalone PDF.
+"""Identify the document's top-level sections for smart splitting. Use the
+document itself and any supplied outline as evidence; do not invent sections
+or titles.
 
-CRITICAL: Do NOT group all front matter into one section, and do NOT group all back matter into one. Each distinct front-matter or back-matter item must be its OWN section with its OWN filename. Examples of separate front-matter sections: cover, copyright page, dedication, table of contents, foreword, preface, acknowledgements. Examples of separate back-matter sections: appendix A, appendix B, glossary, bibliography, index, colophon, about the author.
-
-For proper chapters, use the chapter NUMBER shown in the document (not a running index).
-
-Return STRICT JSON, no prose, matching this schema:
+Follow the output schema and indexing convention requested in the user
+message. For non-PDF documents, do not substitute PDF page fields for the
+requested unit fields. For PDF documents, return this schema:
 {
   "sections": [
     {
-      "title": "Human readable title as it appears in the document",
-      "number": 7,              // printed chapter number if any, else null
-      "kind": "frontmatter" | "chapter" | "backmatter",
-      "start_page": 12,         // 1-based, inclusive
-      "end_page": 34,           // 1-based, inclusive
-      "filename": "07_The_Chapter_Title"   // no extension; safe chars; zero-pad number to 2 digits when present
+      "title": "Title as it appears in the document",
+      "number": 7,
+      "kind": "chapter",
+      "start_page": 1,
+      "end_page": 12,
+      "filename": "07_Chapter_Title"
     }
   ]
 }
 
-Rules:
-- Sections must be contiguous and cover the document in order.
-- Every distinct front/back-matter item is its own section (e.g. "00_cover", "00_copyright", "00_toc", "00_foreword", "99_glossary", "99_index").
-- Front/back matter use number=null and filename prefixed with "00_" (front) or "99_" (back).
-- Filenames: ASCII letters/digits/underscore only, <=80 chars, no extension.
-- Do not invent content not present in the PDF.
-"""
+PDF section rules:
+- Use the PDF's physical page positions, not printed page numbers. Page
+  positions are 1-based and inclusive. If an outline labels pages from 0,
+  outline page [0] is PDF page 1.
+- Return sections in document order. They must partition the entire PDF:
+  the first section starts at page 1, each next section starts on the page
+  immediately after the previous section ends, and the final section ends
+  on the last physical page. No gaps, overlaps, or out-of-range pages.
+- Assign each page to exactly one section. When a section begins on a page,
+  assign that page to the new section; do not duplicate it in the previous
+  section.
+- Identify top-level chapters and distinct front- and back-matter items.
+  Keep subsections within their parent chapter. Do not split a chapter just
+  because it spans multiple pages or contains subheadings.
+- Give each clearly distinct front-matter item its own section (for example,
+  cover, copyright page, dedication, contents, foreword, preface, or
+  acknowledgements). Give each clearly distinct back-matter item its own
+  section (for example, appendices, glossary, bibliography, index, colophon,
+  or about the author). Do not combine all front matter or all back matter
+  into a single section.
+- Set "kind" to "frontmatter", "chapter", or "backmatter". Use null for
+  "number" except for numbered chapters; for those, use the chapter number
+  printed in the document, not the chapter's position in the output.
+- Preserve the displayed title as closely as possible. If a boundary or
+  title is uncertain, prefer the least speculative interpretation and do
+  not invent a section.
+- Filenames must be unique, at most 80 characters, contain only ASCII
+  letters, digits, and underscores, and omit the extension. Prefix
+  front-matter filenames with "00_" and back-matter filenames with "99_".
+  For numbered chapters, begin with the printed number zero-padded to at
+  least two digits, followed by an underscore. Make filenames unique without
+  changing section order.
+
+Return only one valid JSON object. For PDFs, use exactly the keys and types
+in the PDF schema above. For non-PDF documents, use exactly the keys and
+types in the schema requested in the user message. Include every required
+field for every section. Do not include comments, Markdown fences, prose,
+trailing commas, or additional keys."""
 )
 TOC_SYSTEM_PROMPT = (
     "You are an expert technical editor who writes exceptionally detailed, "
