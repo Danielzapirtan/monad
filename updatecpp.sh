@@ -3,7 +3,7 @@
 set -euo pipefail
 
 REPO_DIR="${MONAD_DIR:-$HOME/MONAD}"
-REPO_URL="https://github.com/CorneliuBoboc/MONAD.git"
+REPO_URL="https://github.com/Danielzapirtan/monad.git"
 
 if [[ ! -e "$REPO_DIR" ]]; then
     mkdir -p "$(dirname "$REPO_DIR")"
@@ -19,10 +19,10 @@ fi
 
 origin_url="$(git -C "$REPO_DIR" remote get-url origin)"
 case "$origin_url" in
-    https://github.com/CorneliuBoboc/MONAD|\
-    https://github.com/CorneliuBoboc/MONAD.git|\
-    git@github.com:CorneliuBoboc/MONAD|\
-    git@github.com:CorneliuBoboc/MONAD.git)
+    https://github.com/Danielzapirtan/monad|\
+    https://github.com/Danielzapirtan/monad.git|\
+    git@github.com:Danielzapirtan/monad|\
+    git@github.com:Danielzapirtan/monad.git)
         ;;
     *)
         echo "Error: $REPO_DIR origin is '$origin_url', not $REPO_URL." >&2

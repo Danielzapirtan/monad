@@ -1,4 +1,5 @@
 spec.md
-projects/vd/data
 .venv
 .venv-cpp
+__pycache__/
+*.py[cod]
