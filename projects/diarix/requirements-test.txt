@@ -1,5 +1,6 @@
 # requirements.txt
 requests
+urllib3>=2.0,<3
 flask>=3.0
 faster-whisper
 #openai-whisper>=20231117   # optional: remove if you do not need transcription

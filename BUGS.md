@@ -1,0 +1,13 @@
+# Static review findings
+
+Findings below are from the initial static inspection; line numbers refer to the pre-fix source, and remediation status reflects changes made afterward. Runtime exploitability depends on how each local app is exposed. The review did not establish that the external KindleUnpack repository is compromised.
+
+| # | Severity | File and original lines | Finding | Confidence | Status |
+|---|---|---|---|---:|---|
+| 1 | High | `projects/diarix/app.py:3154-3156`; `projects/diarix.cpp/app.py:3163-3165` | Direct app startup bound Flask's development server to all interfaces (`0.0.0.0`) with `debug=True`. If reachable by an untrusted client, Flask's interactive debugger can expose code execution; the debugger PIN is not a security boundary. [Flask debugger documentation](https://flask.palletsprojects.com/en/stable/debugging/) | 8/10 | Fixed: debug disabled; direct and launcher startup bind to loopback. |
+| 2 | Medium | `projects/diarix/app.py:1259-1275`; `projects/diarix.cpp/app.py:1268-1284` | The media-load endpoint fetched caller-supplied non-YouTube URLs without restricting destinations. A caller who could reach the app could induce requests to internal, loopback, or link-local services. This establishes server-side request forgery, not arbitrary response-body disclosure. [OWASP SSRF Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html) | 8/10 | Fixed: HTTP(S)-only public destinations, validated and pinned per redirect. |
+| 3 | High | `projects/morphix/app.py:199-229, 232-249` | AZW3 conversion downloaded KindleUnpack from the mutable `master` branch, extracted the archive, and executed the downloaded Python script with the app's privileges. A compromise or malicious change to that upstream branch could therefore execute code on the host during conversion. This is a supply-chain risk; the review did not find evidence that the upstream repository is compromised. [GitHub source archive documentation](https://docs.github.com/en/repositories/working-with-files/using-files/downloading-source-code-archives); [Python subprocess documentation](https://docs.python.org/3/library/subprocess.html#subprocess.run) | 8/10 | Fixed: pinned commit archive with SHA-256 verification. |
+
+## Review scope
+
+Static inspection covered the root launcher and utility scripts, the `diarix`, `diarix.cpp`, and `morphix` Flask apps, and relevant dependency/configuration files. No further concrete findings were identified in shell command construction, HTML rendering, or filename/ID-based filesystem access.

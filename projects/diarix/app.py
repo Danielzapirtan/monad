@@ -13,11 +13,13 @@ Run:
 import logging
 import sys
 import io
+import ipaddress
 import json
 import os
 import platform
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -25,10 +27,11 @@ import torch
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import wraps
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 from uuid import uuid4
 
 import requests
+import urllib3
 from flask import (
     Flask, request, jsonify, send_file, abort, render_template_string
 )
@@ -273,6 +276,99 @@ def is_youtube_url(url):
     return parsed.scheme in {"http", "https"} and (
         host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com")
     )
+
+
+def download_public_media(url, destination):
+    """Fetch a public HTTP(S) URL while pinning each validated destination IP."""
+    for redirect_count in range(6):
+        parsed = urlsplit(url)
+        hostname = parsed.hostname
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not hostname
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ValueError("Only public HTTP(S) media URLs are allowed.")
+
+        try:
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        except ValueError as error:
+            raise ValueError("Invalid media URL port.") from error
+        try:
+            literal_ip = ipaddress.ip_address(hostname)
+        except ValueError:
+            try:
+                tls_hostname = hostname.encode("idna").decode("ascii")
+                addresses = [
+                    ipaddress.ip_address(result[4][0])
+                    for result in socket.getaddrinfo(
+                        tls_hostname, port, type=socket.SOCK_STREAM
+                    )
+                ]
+            except (UnicodeError, OSError, ValueError) as error:
+                raise ValueError("Could not resolve the media URL host.") from error
+        else:
+            tls_hostname = hostname
+            addresses = [literal_ip]
+
+        if not addresses or any(not address.is_global for address in addresses):
+            raise ValueError("Media URLs must resolve only to public IP addresses.")
+
+        host_header = f"[{tls_hostname}]" if ":" in tls_hostname else tls_hostname
+        if parsed.port is not None:
+            host_header += f":{parsed.port}"
+        request_path = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+        connect_ip = addresses[0].compressed
+        if parsed.scheme == "https":
+            pool = urllib3.HTTPSConnectionPool(
+                connect_ip,
+                port=port,
+                timeout=30,
+                retries=False,
+                assert_hostname=tls_hostname,
+                server_hostname=tls_hostname,
+            )
+        else:
+            pool = urllib3.HTTPConnectionPool(
+                connect_ip,
+                port=port,
+                timeout=30,
+                retries=False,
+            )
+
+        response = None
+        try:
+            response = pool.urlopen(
+                "GET",
+                request_path,
+                headers={"Host": host_header},
+                redirect=False,
+                retries=False,
+                preload_content=False,
+                timeout=30,
+            )
+            if response.status in {301, 302, 303, 307, 308}:
+                location = response.headers.get("Location")
+                if not location:
+                    raise ValueError("Media server returned a redirect without a location.")
+                next_url = urljoin(url, location)
+                if parsed.scheme == "https" and urlsplit(next_url).scheme != "https":
+                    raise ValueError("HTTPS media URLs cannot redirect to HTTP.")
+                url = next_url
+                if redirect_count == 5:
+                    raise ValueError("Media URL redirected too many times.")
+                continue
+            if not 200 <= response.status < 300:
+                raise ValueError(f"Media server returned HTTP {response.status}.")
+            with open(destination, "wb") as media_file:
+                for chunk in response.stream(65536, decode_content=True):
+                    media_file.write(chunk)
+            return
+        finally:
+            if response is not None:
+                response.close()
+            pool.close()
 
 
 def uses_gpu_device(engine, device):
@@ -619,21 +715,26 @@ def apply_diarization_to_segments(
 def transcribe_one_source_file(
     f, engine, language, device, model_size,
     diarize, diarize_method, ai_provider, api_key, num_speakers,
-    engine_override=None, device_override=None,
+    engine_override=None, device_override=None, defer_pyannote=False,
 ):
-    """Full per-file pipeline used by multi-file mode."""
+    """Transcribe one file; optionally leave pyannote for the coordinator."""
     selected_engine = engine_override or engine
     selected_device = device_override or device
     segs = transcribe_file(
         f["path"], selected_engine, language, selected_device, model_size,
-        hf_token=api_key, diarize=False,
+        hf_token=api_key,
+        diarize=(
+            selected_engine == "mlx"
+            and diarize
+            and diarize_method == "pyannote"
+        ),
     )
     norm_segs = normalize_segments(segs)
-    apply_diarization_to_segments(
-        f["path"], norm_segs, diarize, diarize_method, ai_provider, api_key, num_speakers,
-    )
-    text = segments_to_transcript(norm_segs)
-    return {"name": f["name"], "id": f.get("id"), "transcript": text, "segments": norm_segs}
+    if not (defer_pyannote and diarize and diarize_method == "pyannote"):
+        apply_diarization_to_segments(
+            f["path"], norm_segs, diarize, diarize_method, ai_provider, api_key, num_speakers,
+        )
+    return {"name": f["name"], "id": f.get("id"), "segments": norm_segs}
 
 
 def publish_ready_transcriptions(sess, slots, publish_lock):
@@ -659,12 +760,14 @@ def run_multifile_transcriptions(
     slots = [None] * n
     publish_lock = threading.Lock()
     first_error = []
+    defer_pyannote = diarize and diarize_method == "pyannote"
 
     def work(idx, f):
         try:
             result = transcribe_one_source_file(
                 f, engine, language, device, model_size,
                 diarize, diarize_method, ai_provider, api_key, num_speakers,
+                defer_pyannote=defer_pyannote,
             )
             return idx, result, None
         except Exception as exc:
@@ -673,6 +776,21 @@ def run_multifile_transcriptions(
     def consume(idx, result, exc):
         if exc is not None:
             first_error.append(exc)
+            return
+        try:
+            if defer_pyannote:
+                apply_diarization_to_segments(
+                    source_files[idx]["path"],
+                    result["segments"],
+                    diarize,
+                    diarize_method,
+                    ai_provider,
+                    api_key,
+                    num_speakers,
+                )
+            result["transcript"] = segments_to_transcript(result["segments"])
+        except Exception as error:
+            first_error.append(error)
             return
         slots[idx] = result
         return publish_ready_transcriptions(sess, slots, publish_lock)
@@ -694,27 +812,9 @@ def run_multifile_transcriptions(
     if on_gpu:
         gpu_workers = min(gpu_worker_count(), n)
         cpu_workers = min(cpu_worker_count(max(n - gpu_workers, 1)), n - gpu_workers)
-        try:
-            with ThreadPoolExecutor(max_workers=gpu_workers + cpu_workers) as pool:
-                futures = [pool.submit(work, i, f) for i, f in enumerate(source_files)]
-                for fut in as_completed(futures):
-                    idx, result, exc = fut.result()
-                    consume(idx, result, exc)
-            if first_error:
-                raise first_error[0]
-            return list(sess["transcriptions"])
-        except Exception as exc:
-            if first_error:
-                raise first_error[0]
-            app.logger.warning("GPU/CPU transcription pool failed (%s); sequential fallback.", exc)
-            with sess["lock"]:
-                sess["transcriptions"] = []
-                sess["transcription_status"]["completed"] = 0
-            for i in range(n):
-                slots[i] = None
-            return run_sequential()
-
-    workers = cpu_worker_count(n)
+        workers = gpu_workers + cpu_workers
+    else:
+        workers = cpu_worker_count(n)
     if workers <= 1:
         return run_sequential()
     try:
@@ -729,7 +829,7 @@ def run_multifile_transcriptions(
     except Exception as exc:
         if first_error:
             raise first_error[0]
-        app.logger.warning("CPU transcription pool failed (%s); sequential fallback.", exc)
+        app.logger.warning("Transcription pool failed (%s); sequential fallback.", exc)
         with sess["lock"]:
             sess["transcriptions"] = []
             sess["transcription_status"]["completed"] = 0
@@ -1266,11 +1366,7 @@ def api_load(_session=None, _sid=None):
             ext = ".mp4"
         src_path = os.path.join(sess["dir"], f"source{ext}")
         try:
-            with requests.get(url, stream=True, timeout=30) as r:
-                r.raise_for_status()
-                with open(src_path, "wb") as fh:
-                    for chunk in r.iter_content(65536):
-                        fh.write(chunk)
+            download_public_media(url, src_path)
         except Exception as e:
             return jsonify(error=f"Could not download that URL ({e})."), 400
 
@@ -1519,7 +1615,7 @@ def api_transcribe():
     sources = sorted(sources, key=lambda c: c.get("start", 0.0))
 
     def _transcribe_item(item):
-        if engine == "mlx" and diarize:
+        if engine == "mlx" and diarize and diarize_method == "pyannote":
             segs = transcribe_file(
                 item["path"], engine, language, device, model_size,
                 hf_token=api_key, diarize=True
@@ -3153,4 +3249,4 @@ document.getElementById('downloadZipBtnMulti').addEventListener('click', ()=>{
 
 if __name__ == "__main__":
     # threaded=True so status polling works while a transcription request runs.
-    app.run(debug=True, host="0.0.0.0", port=5030, threaded=True)
+    app.run(debug=False, host="127.0.0.1", port=5030, threaded=True)

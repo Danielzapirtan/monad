@@ -22,6 +22,7 @@ import json
 import time
 import uuid
 import html
+import hashlib
 import shutil
 import zipfile
 import tempfile
@@ -105,6 +106,8 @@ ALLOWED_EXTENSIONS = {"pdf", "docx", "epub", "azw3", "txt", "md", "markdown", "h
 TARGET_FORMATS = {"pdf", "docx", "epub", "md", "html", "txt"}
 KINDLEUNPACK_PATH = None
 _kindleunpack_lock = threading.Lock()
+KINDLEUNPACK_COMMIT = "bf0ca6ece4e73494625e7950be3e259b6260774c"
+KINDLEUNPACK_SHA256 = "dc445158b8347fd19cd29366ba475387c2895e9e482e75c76b6a7b3b8dfeecfb"
 
 DEFAULT_MODELS = {
     "claude": "claude-sonnet-5",
@@ -203,16 +206,17 @@ def ensure_kindleunpack():
         if KINDLEUNPACK_PATH and os.path.exists(KINDLEUNPACK_PATH):
             return KINDLEUNPACK_PATH
 
-        repo_path = Path(tempfile.gettempdir()) / "KindleUnpack"
+        cache_root = Path(tempfile.mkdtemp(prefix="monad-kindleunpack-"))
+        repo_path = cache_root / "source"
         script = repo_path / "lib" / "kindleunpack.py"
-        if not script.exists():
-            if repo_path.exists():
-                shutil.rmtree(repo_path)
+        try:
             response = requests.get(
-                "https://github.com/kevinhendricks/KindleUnpack/archive/refs/heads/master.zip",
+                f"https://github.com/kevinhendricks/KindleUnpack/archive/{KINDLEUNPACK_COMMIT}.zip",
                 timeout=30,
             )
             response.raise_for_status()
+            if hashlib.sha256(response.content).hexdigest() != KINDLEUNPACK_SHA256:
+                raise RuntimeError("KindleUnpack archive failed SHA-256 verification.")
             with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
                 with tempfile.TemporaryDirectory() as temp_dir:
                     archive.extractall(temp_dir)
@@ -220,10 +224,12 @@ def ensure_kindleunpack():
                     if not extracted:
                         raise RuntimeError("KindleUnpack archive contained no directory.")
                     shutil.move(str(extracted[0]), str(repo_path))
-            script = repo_path / "lib" / "kindleunpack.py"
             if not script.exists():
                 raise RuntimeError("kindleunpack.py was not found after download.")
             script.chmod(0o755)
+        except Exception:
+            shutil.rmtree(cache_root, ignore_errors=True)
+            raise
 
         KINDLEUNPACK_PATH = str(script)
         return KINDLEUNPACK_PATH
@@ -2439,5 +2445,4 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5034))
-    debug = os.environ.get("FLASK_DEBUG", "0") == "1"
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    app.run(host="127.0.0.1", port=port, debug=False)
